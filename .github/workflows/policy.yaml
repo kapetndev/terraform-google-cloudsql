@@ -1,0 +1,125 @@
+---
+name: policy
+on:
+  pull_request:
+  push:
+    branches:
+    # This is run on merge queue branches as there are jobs listed in this
+    # action that are often required in branch protection rules. Due to guards
+    # below certain jobs may not run in merge queue branches but will still
+    # return a status indicating a pass.
+    - gh-readonly-queue/**
+    - master
+jobs:
+  commit-message-style:
+    if: github.event_name == 'pull_request' && github.triggering_actor != 'dependabot[bot]'
+    name: Check commit message style
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-node@v3
+      with:
+        node-version: 19.x
+    - name: Install base config
+      run: npm install @commitlint/config-conventional
+    - name: Validate commit messages
+      run: npx commitlint --from ${{ github.event.pull_request.base.sha }} --to HEAD --verbose
+  markdown-style:
+    name: Check markdown style
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - uses: actions/setup-node@v3
+      with:
+        node-version: 19.x
+    - name: Validate markdown
+      run: npx markdownlint-cli2 **/*.md
+  terraform:
+    name: Check Terraform configuration style
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      TF_IN_AUTOMATION: 1
+      TF_INPUT: 0
+    steps:
+    - uses: actions/checkout@v4
+    - uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: 1.4.7
+    - name: Check Terraform configuration
+      id: fmt
+      run: terraform fmt -check -recursive -diff
+    - uses: actions/github-script@v6
+      if: github.event_name == 'pull_request' && always()
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          // Retrieve existing bot comments for the PR.
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+
+          const botComment = comments.find(comment => {
+            return comment.user.type === 'Bot' && comment.body.includes('Terraform Format and Style')
+          });
+
+          const formatSummary = `${{ steps.fmt.outputs.stdout }}`.trim() || 'No difference';
+
+          // Prepare format of the comment.
+          const output = `#### Terraform Format and Style \`${{ steps.fmt.outcome }}\`
+          <details><summary>Formatting Output</summary>
+
+          \`\`\`diff
+          ${formatSummary}
+          \`\`\`
+
+          </details>`;
+
+          // If we have a comment, update it, otherwise create a new one.
+          if (botComment) {
+            github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: output,
+            });
+          } else {
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: output,
+            });
+          }
+  tfsec:
+    name: Scan Terraform code for security vulnerabilities
+    needs: terraform
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+    - uses: actions/checkout@v4
+    - uses: aquasecurity/tfsec-pr-commenter-action@v1.3.1
+      with:
+        github_token: ${{ github.token }}
+  yaml-style:
+    name: Check YAML style
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v4
+      with:
+        python-version: "3.10"
+    - name: Install yamllint
+      run: pip install --user yamllint
+    - name: Validate YAML
+      run: yamllint .
